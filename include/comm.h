@@ -3,6 +3,7 @@
 
 #program pack(1)
 
+#define HELLO_INTERAL_SEC 10
 typedef struct _DShmHead
 {
     unsigned char cmd;

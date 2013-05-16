@@ -1,18 +1,127 @@
 #include "proxyserver.h"
 #include <errno.h>
+#include <iostream>
+#include <arpa/inet.h>
 
 
 
-
-void * threadfun(void * p)
+void * threadfun(void * parm)
 {
-    dshm_thread_info * p = (dshm_thread_info *)p;
-    
+	struct dshm_thread_info * pt = (struct dshm_thread_info *)parm;
+    unsigned char req[256] = {0};
+    unsigned char resp[256] = {0};
+    char  url[128] = {0};
+    char  key[128] = {0};
+
+    unsigned char * p = req;
+    int reqlen = 0;
+    server_info * svrlist = new server_info[100];
+    int svr_num = 0;
+
+    int ret = 0;
+    int  tnow = 0;
     while(1)
     {
-        // hello to all svr
+         // hello to all svr
+        sleep(HELLO_INTERAL_SEC);
+        tnow = time(0);
 
-        
+        std::map<std::string,server_info>::iterator it = pt->svrlist->begin();
+
+		for ( ;  it != pt->svrlist->end(); ++it){
+
+			svrlist[svr_num] = it->second;
+		    svr_num++;
+		}
+
+		for(int  i =  0 ; i< svr_num; i++)
+		{
+			do
+			{
+				if(svrlist[svr_num].stat  != 0  && svrlist[svr_num].last_time  + 300 > tnow)
+				{
+                    continue;
+				}
+
+				pt->info->socket = zmq_socket (pt->info->context,   ZMQ_REQ);
+
+				sprintf(url ,    "tcp://%s:%d", svrlist[i].ip,  svrlist[i].resp_port);
+				ret = zmq_connect (pt->info->socket,  url);
+
+				if(ret != 0 )
+				{
+					//
+					ret = -1;
+					break;
+				}
+
+				int request_nbr;
+
+				char buffer [10];
+				printf ("Sending Hello %d…\n", request_nbr);
+
+				ret = zmq_send (pt->info->socket  ,  req , reqlen, 0);
+
+				if(ret !=  reqlen)
+				{
+					ret = -2;
+					break;
+				}
+
+				zmq_pollitem_t  pollit ;
+				pollit.fd = 0;
+				pollit.socket = pt->info->socket ;
+				pollit.events = ZMQ_POLLIN;
+				pollit.revents = 0;
+
+		        ret = zmq_poll (&pollit,  1,   1*1000000);
+
+		        if(ret <=  0)
+		        {
+		        	ret = -3;
+		            break;
+		        }
+
+				ret = zmq_recv (pt->info->socket , resp,  sizeof(resp),  0);
+
+				if(ret  <  0  )
+				{
+					ret = -4;
+					break;
+				}
+			}while(0);
+
+			if(ret < 0)
+			{
+				LOG2(2, "req %s fail, ret = %d", url, ret);
+
+				//remove the server from list
+				svrlist[svr_num].stat = -1;
+				svrlist[svr_num].err_num ++;
+			}
+			else
+			{
+				LOG2(2, "req %s  succ", url);
+				svrlist[svr_num].stat = 0;
+				svrlist[svr_num].err_num = 0;
+				svrlist[svr_num] .last_time = tnow;
+			}
+
+			zmq_close(pt->info->socket );
+		}
+
+		for (int k = 0 ;  ; ++it,k++)
+		{
+				sprintf(key, "%s:%d" , svrlist[k] .ip, svrlist[k].resp_port);
+				std::map<std::string,server_info>::iterator it  = pt->svrlist->find(key);
+				if( it ==  pt->svrlist->end() )
+				{
+					pt->svrlist->insert(std::pair<std::string, server_info>(key,  svrlist[k]));
+				}
+				else{
+					pt->svrlist[key] = svrlist[k];
+				}
+        }
     }
     return 0;
 }
@@ -23,24 +132,17 @@ ProxySvr::ProxySvr()
 {
     m_so_load = 0;
     m_lastchangetime = 0;
-    return 0;
+    return ;
 }
 
 ProxySvr::~ProxySvr()
 {
-     return 0;
+     return ;
 }
 
 
-ProxySvr::load_so()
+int ProxySvr::load_so()
 {
-    if(m_so_load)
-    {
-        return 0;
-    }
-
-    m_so_load = 1;
-    
     return 0;
 }
 
@@ -64,7 +166,7 @@ int ProxySvr::init(mq_init_info pA[], int cnt, int loopinteval_milliseconds)
     {
         pA[i].context = zmq_ctx_new ();
         
-        switch(case pA[i].type)
+        switch( pA[i].type)
         {
             case ZMQ_PULL:
                 pA[i].socket = zmq_socket (pA[i].context, ZMQ_PULL);
@@ -88,9 +190,11 @@ int ProxySvr::init(mq_init_info pA[], int cnt, int loopinteval_milliseconds)
                 sprintf(m_errmsg, "Name %d  type %d is error", pA[i].name, pA[i].type);
                 return -2;
         }
+
         m_items.items[i].socket =  pA[i].socket;
         m_items.items[i].events = ZMQ_POLLIN;
-                m_items.name[i] = pA[i].name;
+        m_items.name[i] = pA[i].name;
+
         if(pA[i].role == ROLE_Client)
         {
             continue;
@@ -114,7 +218,6 @@ int ProxySvr::init(mq_init_info pA[], int cnt, int loopinteval_milliseconds)
         }
         
 
-        
 
     }
     
@@ -125,7 +228,14 @@ int ProxySvr::init(mq_init_info pA[], int cnt, int loopinteval_milliseconds)
     pt->info = pA[pt->info];
     pt->svrlist = &m_svrlist;
 
+    ret = pthread_create( &m_threadid ,  NULL ,  threadfun ,  pt);
     
+    if( ret < 0 )
+    {
+    	//
+    	std::cout << "create thread fail" << std::endl;
+    	return 1;
+    }
     return 0;
 }
 
@@ -185,7 +295,7 @@ int  ProxySvr::loop()
                 case EFAULT:
                     //The provided items was not valid
                     LOG("The provided items was not valid");
-                    break
+                    break;
 
                 case EINTR:
                     //The operation was interrupted by delivery of a signal before any events were available.
@@ -200,7 +310,7 @@ int  ProxySvr::loop()
         
         for(int i = 0 ; i < m_item_num ,  ret > 0 ; i++ )
         {
-            if (m_items[i].items.revents & ZMQ_POLLIN) 
+            if (m_items.items[i].revents & ZMQ_POLLIN)
             {
                 ret--;
                 
@@ -335,21 +445,25 @@ int ProxySvr::handle_resp(zmq_pollitem_t * pitem, char * buf, int len)
 
 int  ProxySvr::add_svrlist(server_info infos)
 {
-    std::string  key;
-    key = infos.ip + std::to_string(infos.port);
-    m_svrlist.insert(std::pair<key, infos>);
+	char key[128] = {0};
+    sprintf(key, "%s:%d", infos.ip, infos.resp_port);
+
+    m_svrlist.insert(std::pair<std::string, infos>(key, infos));
     return 0;
 }
 
 int  ProxySvr::get_svrlist(server_info infos[], int & cnt)
 {
     int count =  0;
-    std::map<char,int>::iterator it = m_svrlist.begin();
+    std::map<std::string,server_info>::iterator it = m_svrlist.begin();
     for ( ; count!= m_svrlist.end(); ++it){
 
         if(count < cnt)
         {
-            infos[count] = it.second;
+        	if( it->second.stat == 0 )
+        	{
+                infos[count] = it->second;
+        	}
         }
 
         count++;
@@ -372,6 +486,7 @@ int  ProxySvr::add_clientlist(server_info infos)
     
     return 0;
 }
+
 
 int  ProxySvr::get_clientlist(client_info infos[], int & cnt)
 {
